@@ -1,0 +1,460 @@
+---
+title: "VAT_01"
+author: "Vansika Saraf"
+date: "12/2/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Kaggle Competition: https://www.kaggle.com/c/stats101c-lec3-final-competition/overview
+
+#Loading libraries
+```{r}
+library(tidyverse)
+library(caret)
+library(leaps)
+library(glmnet)
+library(gbm)
+library(lubridate)
+library(reshape2)
+library(dplyr)
+library(randomForest)
+library(pls)
+```
+
+#Loading the data
+```{r}
+yt_train <- read.csv("training.csv")
+yt_test <- read.csv("test.csv")
+any(is.na(yt_test))
+#summary(yt_train)
+
+head(yt_train)
+
+yt_train <- yt_train[,-1]
+
+#Converting PublishedDate to DateTime format 
+yt_train$PublishedDate <- paste(yt_train$PublishedDate, ":00", sep = "")
+yt_train$PublishedDate <- mdy_hms(yt_train$PublishedDate)
+
+
+#Converting PublishedDate to DateTime format 
+yt_test$PublishedDate <- paste(yt_test$PublishedDate, ":00", sep = "")
+yt_test$PublishedDate <- mdy_hms(yt_test$PublishedDate)
+```
+
+#Removing the highly correlated predictors
+```{r}
+# Near-Zero-Variance 
+nzv <- nearZeroVar(yt_train, saveMetrics= TRUE)
+nzv[nzv$nzv,][,]
+dim(yt_train)
+
+nzv <- nearZeroVar(yt_train)
+filtered_training <- yt_train[, -nzv]
+dim(filtered_training)
+
+yt_train <- filtered_training
+filtered_training_names <- names(yt_train)[names(yt_train) != 'growth_2_6']
+
+yt_test <- yt_test[, filtered_training_names]
+```
+
+
+
+# Splitting our training data to 70 and 30
+```{r}
+#70% of data for train and 30% of data for test
+train_size = floor(0.7 * nrow(yt_train))
+
+#set the seed
+set.seed(123)
+
+#get training indices
+train_ind = sample(seq_len(nrow(yt_train)), size = train_size)
+
+data_train = yt_train[train_ind, ]
+data_test = yt_train[-train_ind, ]
+
+X_train = model.matrix(growth_2_6 ~., data_train)[,-1]
+y_train = data_train$growth_2_6
+
+X_test = model.matrix(growth_2_6 ~., data_test)[,-1]
+y_test = data_test$growth_2_6
+```
+
+# Grouping the hog variables & transforming with PCA
+```{r}
+# hog_data <- yt_train[,4:155]
+# hog_data$growth_2_6 <- yt_train$growth_2_6
+# 
+# hog_matrix <- model.matrix(growth_2_6 ~., hog_data)[,-1]
+# 
+# pca = prcomp(hog_matrix, scale=TRUE)
+# summary(pca)
+# 
+# ncomps_hog = 78 # 0.9512
+# pca_hog = prcomp(hog_matrix, rank=ncomps_hog, retx=TRUE, scale=TRUE)
+# summary(pca_hog)
+# #get transformed data
+# Z_train_hog = hog_matrix %*% pca_hog$rotation # 7242 x 152  152 x 78  
+# nrow(Z_train_hog)
+# nrow(yt_train)
+# #revert to original data frames
+# data_train_pca_hog = data_train[,-(4:155)]
+# data_test_pca_hog = data_test[,-(4:155)]
+# 
+# #attach PC variables
+# pc_var_names_hog = apply(as.matrix(1:ncomps_hog), 2, function(s){paste('pc_hog', s, sep='_')})
+# 
+# data_train_pca_hog[,pc_var_names_hog] = Z_train_hog[1:nrow(data_train_pca_hog),]
+# data_test_pca_hog[,pc_var_names_hog] = Z_train_hog[(nrow(data_train_pca_hog)+1):(nrow(yt_train)),]
+# 
+# print(head(data_train_pca_hog))
+# print(head(data_test_pca_hog))
+# 
+# predictors
+```
+
+```{r}
+hog_data <- yt_train[,4:155]
+hog_data$growth_2_6 <- yt_train$growth_2_6
+
+
+pls_model = plsr(growth_2_6 ~ ., data = hog_data , scale = TRUE, validation = "CV")
+model_pls_mse <- MSEP(pls_model, estimate = "CV")$val %>%
+  reshape2::melt() %>%
+  mutate(M = 0:(nrow(.)-1)) %>%
+  select(M, value) %>%
+  rename(CV_MSE = value)
+
+ncomps_hog <- model_pls_mse[which.min(model_pls_mse$CV_MSE),] #Finding the min number of components
+ncomps_hog
+#validationplot(pls_model, val.type = "MSEP")
+#summary(pcr_model)
+
+pls_model = plsr(growth_2_6 ~., data=hog_data, scale=TRUE, ncomp=ncomps_hog$M)
+summary(pls_model)
+
+# Data Storage
+Z = pls_model$scores
+#size_Z = object.size(Z)
+#print(size_Z)
+
+predictor_names = names(hog_data)[names(hog_data) != 'growth_2_6']
+#X = as.matrix(data_train[,predictor_names])
+#size_X = object.size(X)
+#print(size_X)
+
+#print(as.numeric(size_Z / size_X))
+
+
+proj = pls_model$projection
+X = as.matrix(hog_data[,predictor_names])
+Z = as.data.frame(scale(X) %*% proj)
+#attach PC variables
+pls_var_names_hog = apply(as.matrix(1:ncomps_hog$M), 2, function(s){paste('pls_hog', s, sep='_')})
+colnames(Z) = pls_var_names_hog
+
+#revert to original data frames
+data_train_pls_hog = data_train[,-(4:155)]
+data_test_pls_hog = data_test[,-(4:155)]
+
+
+data_train_pls_hog[,pls_var_names_hog] = Z[1:nrow(data_train_pls_hog),]
+data_test_pls_hog[,pls_var_names_hog] = Z[(nrow(data_train_pls_hog)+1):(nrow(yt_train)),]
+
+```
+
+
+# Big loop to figure everything out
+
+for
+  update to original training (make a new var)
+  elastic net - change alphas, lambda
+  get predictors
+  subset data
+   for ntree
+          for mtry - make mtry_vals after getting num of predictors
+              for nodesize
+                  randomForest
+                  predict
+                  mse
+
+```{r}
+# ntree 500 - 2000 by 100, mtry 1 - p & include p/3, nodesize 5 - 50, importance = TRUE
+
+# alpha_vals <- seq(0.1, 0.9, by = 0.2)
+# lambda_vals <- 10^seq(-3, 0, by = 0.1)
+# ntree_vals <- seq(1000, 2000, by = 500)
+# nodesize_vals <- c(5, 10, 25, 37, 50)
+# en.best.lambda.cv <- c()
+# p <- c()
+# count <- 1
+# rmse_vals <- c()
+# df <- data.frame("alpha" = c(),
+#                  "lambda" = c(),
+#                  "ntree" = c(),
+#                  "mtry" = c(),
+#                  "nodesize" = c(),
+#                  "RMSE" = c(),
+#                  "n" = c())
+# 
+# set.seed(1)
+# 
+# # for - splitting data for cv
+# for(n in 1:5){
+#   
+#   i.train <- sample(nrow(data_train), size = round(nrow(data_train)/5))
+#   training <- data_train[i.train, ]
+#   validation <- data_train[-i.train, ]
+#   
+#   for(i in 1:length(alpha_vals)){
+#     # new data train
+#     data_train_cv <- training
+#     data_test_cv <- validation
+#     
+#     X_train_cv = model.matrix(growth_2_6 ~., data_train_cv)[,-1]
+#     y_train_cv = data_train_cv$growth_2_6
+#     
+#     # Elastic Net
+#     en.cv.output <- cv.glmnet(X_train_cv, y_train_cv, family = "gaussian",
+#                               alpha = alpha_vals[i], lambda = lambda_vals,
+#                               standardize = TRUE, nfolds = 10)
+#   
+#     en.best.lambda.cv[i] <- en.cv.output$lambda.min
+#   
+#     en.mod <- glmnet(X_train_cv, y_train_cv, family = "gaussian",
+#                      alpha = alpha_vals[i], lambda = en.cv.output$lambda.min,
+#                      standardize = TRUE)
+#     
+#     # Getting predictors after Elastic Net
+#     var_imp <- varImp(en.mod, lambda = en.cv.output$lambda.min)
+#     var_imp <- as.data.frame(var_imp)
+#     rows <- row.names(var_imp)
+#     var_imp_df <- data.frame("Predictors" = rows, var_imp$Overall)
+#     predictors_en <- ifelse(var_imp$Overall > 0, T, F)
+#     predictors_en_names <- var_imp_df[predictors_en,]
+#     
+#     predictors <- c(predictors_en_names$Predictors, "growth_2_6")
+#     
+#     data_train_cv <- data_train_cv[,predictors]
+#     data_test_cv <- data_test_cv[,predictors]
+#     
+#     p[i] <- length(predictors) - 1
+#     mtry_vals <- c(p[i]/3, p[i])
+#     
+#     # update data with new preds
+#     
+#     for(j in 1:length(ntree_vals)){
+#       for(k in 1:length(mtry_vals)){
+#         for(l in 1:length(nodesize_vals)){
+#           
+#           # Fitting Random Forest
+#           rf_model <- randomForest(growth_2_6 ~ ., data = data_train_cv,
+#                                    ntree = ntree_vals[j], mtry = mtry_vals[k],
+#                                    nodesize = nodesize_vals[l], importance = TRUE)
+#           
+#           #predict with RF
+#           rf_preds = predict(rf_model, data_test_cv)
+#           
+#           rmse_vals[count] <- RMSE(rf_preds, data_test_cv$growth_2_6)
+#           
+#           df[count, 1] <- alpha_vals[i]
+#           df[count, 2] <- en.cv.output$lambda.min
+#           df[count, 3] <- ntree_vals[j]
+#           df[count, 4] <- mtry_vals[k]
+#           df[count, 5] <- nodesize_vals[l]
+#           df[count, 6] <- RMSE(rf_preds, data_test_cv$growth_2_6)
+#           df[count, 7] <- n
+#           
+#           count <- count + 1
+#         } # nodesize
+#       } # mtry
+#     } # ntree
+#   } # elastic net
+# } # cv
+# 
+# nrow(df)
+# 
+# names(df) <- c("alpha", "lambda", "ntree", "mtry", "nodesize", "RMSE", "n")
+# 
+# df[which.min(df$RMSE),]
+
+#(length(alpha_vals) * 5 * length(ntree_vals) * 2 * length(nodesize_vals))
+
+#	0.5	0.1258925	1500	52	5	1.667341	2
+```
+
+# Performing Lasso
+```{r}
+data_train <- data_train_pls_hog
+data_test <- data_test_pls_hog
+
+# Let's define a grid of possible values for lambda
+#grid <- 10^seq(-3, 0, by = 0.1)
+
+X_train = model.matrix(growth_2_6 ~., data_train)[,-1]
+y_train = data_train$growth_2_6
+
+X_test = model.matrix(growth_2_6 ~., data_test)[,-1]
+y_test = data_test$growth_2_6
+
+i.exp <- seq(10, -2, length = 100)
+grid <- 10^i.exp
+#grid
+
+#Need to fix it for the plot
+#x <- scale(x)
+
+lasso.mod <- glmnet(X_train, y_train, family = "gaussian", alpha = 1, 
+                    lambda = grid, standardize = TRUE)
+
+#lasso.mod$lambda # Shows the values of lambda used.
+
+
+
+# Plots of coefficients.
+#plot(lasso.mod, xvar = "lambda", label = TRUE)
+
+# Select the best value for lambda using K-fold cross-validation.
+lasso.cv.output <- cv.glmnet(X_train, y_train, family = "gaussian", alpha = 1, 
+                      lambda = grid, standardize = TRUE,
+                      nfolds = 10)
+#plot(lasso.cv.output)
+
+# Retrieve the actual best value of lambda.
+lasso.best.lambda.cv <- lasso.cv.output$lambda.min
+lasso.best.lambda.cv
+
+var_imp <- varImp(lasso.mod, lambda = lasso.best.lambda.cv)
+var_imp <- as.data.frame(var_imp)
+rows <- row.names(var_imp)
+var_imp_df <- data.frame("Predictors" = rows, var_imp$Overall)
+predictors_lasso <- ifelse(var_imp$Overall > 0, T, F)
+predictors_lasso_names <- var_imp_df[predictors_lasso,]
+
+length(predictors_lasso_names$Predictors)
+
+predictors <- c(predictors_lasso_names$Predictors, "growth_2_6")
+
+
+
+# predict(lasso.mod, s = lasso.best.lambda.cv, type = "coefficients")
+# 
+# pred_lasso <-  predict(lasso.mod, s = lasso.best.lambda.cv, newx = X_test)
+# 
+# lasso_mse = sqrt(mean((pred_lasso - y_test)^2))
+# lasso_mse
+
+```
+
+
+# Using the predictors from Lasso model and fitting trees
+
+# Bagging
+```{r}
+set.seed(1)
+data_train_tree <- data_train[, predictors]
+data_test_tree <- data_test[, predictors]
+
+bag = randomForest(growth_2_6 ~ .,data = data_train_tree,
+                   mtry = length(predictors) - 1, importance =TRUE,
+                   ntrees = 1500, nodesize = 8)
+
+yhat.bag = predict(bag, newdata = data_test_tree)
+
+head(yhat.bag)
+range(yhat.bag)
+
+RMSE(yhat.bag, data_test_tree$growth_2_6)
+```
+
+bagging with elastic net & lambda = 0.1258925, RMSE = 1.538273
+
+Put in a growth_2_6 column and fill it with 0s
+
+
+With PCR
+      3         4         7         8         9        10 
+1.3595153 1.3034517 2.2025018 0.8670266 6.2054834 4.5623754 
+[1] 0.3669548 7.5687721
+[1] 1.518712
+
+With PLS
+       3         4         7         8         9        10 
+1.5557399 1.1438902 2.1461579 0.9141988 6.5444648 4.4871685 
+[1] 0.3390767 7.7659033
+[1] 1.499321
+
+
+# Fitting the model on the full train data
+```{r}
+# hog transformation
+yt_train_pls_hog = yt_train[,-(4:155)]
+yt_train_pls_hog[,pls_var_names_hog] = Z[1:nrow(yt_train),]
+
+
+
+yt_train_bag <- yt_train_pls_hog[,predictors]
+bag_train = randomForest(growth_2_6 ~ .,data = yt_train_bag,
+                   mtry = length(predictors) - 1, importance =TRUE,
+                   ntrees = 1500, nodesize = 8)
+yhat.bag.train = predict(bag_train, newdata = yt_train_bag)
+range(yhat.bag.train)
+RMSE(yhat.bag.train, yt_train_bag$growth_2_6)
+```
+
+# Fitting the model on test data
+```{r}
+# hog transformation
+yt_test_pls_hog = yt_test[,4:155]
+#yt_test_pls_hog$growth_2_6 <- rep(0, nrow(yt_test))
+
+X = as.matrix(yt_test_pls_hog[,predictor_names])
+Z_test = as.data.frame(scale(X) %*% proj)
+pls_var_names_hog = apply(as.matrix(1:ncomps_hog$M), 2, function(s){paste('pls_hog', s, sep='_')})
+colnames(Z_test) = pls_var_names_hog
+
+yt_test_pls_hog_final = yt_test[,-(4:155)]
+
+yt_test_pls_hog_final[,pls_var_names_hog] = Z_test[1:nrow(yt_test_pls_hog_final),]
+
+print(head(yt_test_pls_hog_final))
+
+# predicting with bagging
+yt_test_bag <- yt_test_pls_hog_final[,predictors[-length(predictors)]]
+yhat.bag.test = predict(bag_train, newdata = yt_test_bag)
+range(yhat.bag.test)
+
+yt_test <- read.csv("test.csv")
+
+sol <- data.frame(yt_test$id, yhat.bag.test)
+names(sol) <- c("id", "growth_2_6")
+head(sol)
+
+write.csv(sol, file = "sol_26.csv", row.names = F)
+```
+
+
+# OH with Ritvik
+- Should we preProcess the data? If we do, how do we use it?
+- PCR performed really bad (RMSE = 3.6+), so what should we do?
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
